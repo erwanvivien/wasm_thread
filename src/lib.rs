@@ -1,9 +1,12 @@
 use async_channel::Receiver;
 use futures::executor::block_on;
+use once_cell::sync::Lazy;
 use std::any::Any;
 use std::fmt;
 use std::mem;
 
+use std::sync::Arc;
+use std::sync::Mutex;
 pub use std::thread::{current, sleep, Result, Thread, ThreadId};
 
 use wasm_bindgen::prelude::*;
@@ -20,12 +23,27 @@ extern "C" {
     fn load_module_workers_polyfill();
 }
 
+type StaticString = Lazy<Arc<Mutex<Option<String>>>>;
+
+static PATH: StaticString = Lazy::new(|| Arc::new(Mutex::new(None)));
+static PREFIX: StaticString = Lazy::new(|| Arc::new(Mutex::new(None)));
+
 /// Extracts path of the `wasm_bindgen` generated .js shim script
 pub fn get_wasm_bindgen_shim_script_path() -> String {
-    js_sys::eval(include_str!("script_path.js"))
-        .unwrap()
-        .as_string()
-        .unwrap()
+    PATH.lock().unwrap().clone().unwrap_or_else(|| {
+        js_sys::eval(include_str!("script_path.js"))
+            .unwrap()
+            .as_string()
+            .unwrap()
+    })
+}
+
+pub fn set_wasm_bindgen_shim_script_path(path: String) {
+    *PATH.lock().unwrap() = Some(path);
+}
+
+pub fn set_worker_prefix(prefix: String) {
+    *PREFIX.lock().unwrap() = Some(prefix);
 }
 
 /// Generates worker entry script as URL encoded blob
@@ -219,9 +237,21 @@ impl Builder {
 
         // Todo: figure out how to set stack size
         let mut options = WorkerOptions::new();
-        if let Some(name) = name {
-            options.name(&name);
-        }
+        let prefix = PREFIX.lock().unwrap().clone();
+        match (name, prefix) {
+            (Some(name), Some(prefix)) => {
+                options.name(&format!("{}:{}", prefix, name));
+            }
+            (Some(name), None) => {
+                options.name(&name);
+            }
+            (None, Some(prefix)) => {
+                let random = (js_sys::Math::random() * 10e10) as u64;
+                options.name(&format!("{}:{}", prefix, random));
+            }
+            (None, None) => {}
+        };
+
         #[cfg(feature = "es_modules")]
         {
             load_module_workers_polyfill();
